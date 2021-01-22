@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Uploader4PDA": {
+      "commandName": "Project",
+      "commandLineArgs": "netcoreapp.zip"
+    }
+  }
+}
