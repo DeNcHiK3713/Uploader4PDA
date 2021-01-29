@@ -1,6 +1,7 @@
 ﻿using Luna.ConsoleProgressBar;
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -17,15 +18,14 @@ namespace Uploader4PDA
         private static AppSettings Settings = SettingsManager.GetSection<AppSettings>();
         static async Task Main(string[] args)
         {
-            if (args.Length < 1 || !File.Exists(args[0]))
+            FileInfo fileInfo;
+            if (args.Length < 1 || !(fileInfo = new FileInfo(args[0])).Exists)
             {
                 Console.WriteLine("File not found!");
                 return;
             }
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             var fname = Path.GetFileName(args[0]);
-
-            var file = File.OpenRead(args[0]);
 
             CookieContainer cookieContainer = new CookieContainer();
             cookieContainer.Add(new Cookie("member_id", Settings.MemberId, "/", "4pda.ru"));
@@ -50,10 +50,10 @@ namespace Uploader4PDA
                     { "forum-attach-files", "" },
                     { "index", "1" },
                     { "maxSize", "201326592" },
-                    { "md5", GetMD5(file) },
+                    { "md5", GetMD5(fileInfo) },
                     { "name", fname },
                     { "relId", "0" },
-                    { "size", file.Length.ToString() },
+                    { "size", fileInfo.Length.ToString() },
                     { "topic_id", Settings.TopicId }
                 })
             };
@@ -73,11 +73,11 @@ namespace Uploader4PDA
                 }
 
                 Console.WriteLine($"File {fname} exist on server");
-                return;
             }
             else
             {
                 Console.Write(fname);
+                Console.Write(" ");
 
                 var progressBar = new ConsoleProgressBar
                 {
@@ -88,53 +88,61 @@ namespace Uploader4PDA
                 };
 
 
-                file.Position = 0;
-                var progressContent = new ProgressStreamContent(file, CancellationToken.None);
+                var client = new MyWebClient(cookieContainer, 30000).AddHeaders($"https://4pda.ru/forum/index.php?showtopic={Settings.TopicId}");
 
-                progressContent.Progress = (bytes, totalBytes, totalBytesExpected) =>
+                var multipart = new MultipartFormBuilder();
+
+                multipart.AddField("topic_id", Settings.TopicId);
+                multipart.AddField("index", "1");
+                multipart.AddField("relId", "0");
+                multipart.AddField("maxSize", "201326592");
+                multipart.AddField("allowExt", "");
+                multipart.AddField("forum-attach-files", "");
+                multipart.AddField("code", "upload");
+
+                multipart.AddFile("FILE_UPLOAD", fileInfo);
+
+                var totalBytes = multipart.GetStream().Length;
+
+                client.UploadProgressChanged += (o, e) =>
                 {
-                    if (bytes == totalBytes)
+                    //progressBar.Report((double)e.BytesSent / e.TotalBytesToSend); // e.TotalBytesToSend is always -1
+                    progressBar.Report((double)e.BytesSent / totalBytes);
+                };
+                var tcs = new TaskCompletionSource<byte[]>();
+                client.UploadDataCompleted += (o, e) =>
+                {
+                    if (e.Cancelled)
                     {
-                        progressBar.Report(1);
-                        Console.WriteLine();
+                        progressBar.Report(0);
                     }
                     else
                     {
-                        progressBar.Report((double)bytes / totalBytes);
+                        progressBar.Report(1);
                     }
+
+                    response = Encoding.UTF8.GetString(e.Result)
+                        .Replace("", "")
+                        .Replace('', '');
+                    var result = response.Split('');
+                    if (response != "1" && result.Length < 6)
+                    {
+                        Console.WriteLine($"UNACCEPTABLE FILE: {fname}");
+                        tcs.SetResult(e.Result);
+                        return;
+                    }
+
+                    Console.WriteLine();
+                    Console.WriteLine($"File {fname} uploaded");
+                    tcs.SetResult(e.Result);
                 };
-
-                MultipartFormDataContent form = new MultipartFormDataContent
-                {
-                    { new StringContent(Settings.TopicId), "topic_id" },
-                    { new StringContent("1"), "index" },
-                    { new StringContent("0"), "relId" },
-                    { new StringContent("201326592"), "maxSize" },
-                    { new StringContent(""), "allowExt" },
-                    { new StringContent(""), "forum-attach-files" },
-                    { new StringContent("upload"), "code" },
-                    { progressContent, "FILE_UPLOAD", fname }
-                };
-                res = await httpClient.PostAsync("https://4pda.ru/forum/index.php?act=attach", form);
-                progressBar.Report(1);
-                response = (await res.Content.ReadAsStringAsync())
-                    .Replace("", "")
-                    .Replace('', '');
-                var result = response.Split('');
-                if (response != "1" && result.Length < 6)
-                {
-                    Console.WriteLine($"UNACCEPTABLE FILE: {fname}");
-                    return;
-                }
-
-                Console.WriteLine($"File {fname} uploaded");
-                return;
-
+                client.UploadMultipartAsync(new Uri("https://4pda.ru/forum/index.php?act=attach"), multipart);
+                await tcs.Task;
             }
         }
-        public static string GetMD5(Stream file)
+        public static string GetMD5(FileInfo fileInfo)
         {
-            byte[] hash = new MD5CryptoServiceProvider().ComputeHash(file);
+            byte[] hash = new MD5CryptoServiceProvider().ComputeHash(File.ReadAllBytes(fileInfo.FullName));
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < hash.Length; i++)
             {
